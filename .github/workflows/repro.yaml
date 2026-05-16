@@ -17,43 +17,52 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # serial-20k: confirm baseline rate at higher sample size
-          - scenario: serial-20k-plain
+          # plain: control. cmd.Stdout = bytes.Buffer, no WaitDelay.
+          # Uses Go's goroutine pipe-copy for stdout collection.
+          - scenario: plain-30k
             extra_flags: ""
-            iters: "20000"
+            iters: "30000"
             parallel: "1"
             modes: "plain"
 
-          # serial-20k-retry: prove retry catches flakes (look for rows where
-          # `attempts` contains EMPTY_STDOUT_NIL_ERR followed by OK)
-          - scenario: serial-20k-retry
-            extra_flags: "--max-retries 3"
-            iters: "20000"
+          # wait-delay-5s: same as plain, plus WaitDelay = 5s. With a
+          # non-zero WaitDelay on a CommandContext, Go spawns a watchCtx
+          # goroutine and adds a channel synchronization in Wait() that
+          # the plain path skips. Both flakes from the first run landed
+          # in this mode.
+          - scenario: wait-delay-5s-30k
+            extra_flags: ""
+            iters: "30000"
             parallel: "1"
-            modes: "retry"
+            modes: "wait-delay"
 
-          # parallel-4: does concurrent contention against the same distro
-          # raise the rate? Same total calls, four workers.
-          - scenario: parallel-4-20k
+          # wait-delay-30s: same as wait-delay-5s with a larger value.
+          # If WaitDelay merely flips the watchCtx path on/off, the
+          # rate here should match wait-delay-5s.
+          - scenario: wait-delay-30s-30k
             extra_flags: ""
-            iters: "20000"
-            parallel: "4"
-            modes: "plain"
+            iters: "30000"
+            parallel: "1"
+            modes: "wait-delay-30s"
 
-          # parallel-8: more pressure (windows-latest has 4 vCPUs, this
-          # oversubscribes)
-          - scenario: parallel-8-20k
+          # combined-output: cmd.CombinedOutput() collects stdout and
+          # stderr into one buffer. Tests whether the two-buffer
+          # arrangement contributes.
+          - scenario: combined-output-30k
             extra_flags: ""
-            iters: "20000"
-            parallel: "8"
-            modes: "plain"
+            iters: "30000"
+            parallel: "1"
+            modes: "combined-output"
 
-          # parallel-8-retry: stress retry under contention
-          - scenario: parallel-8-retry-50k
-            extra_flags: "--max-retries 3"
-            iters: "50000"
-            parallel: "8"
-            modes: "retry"
+          # file-out: cmd.Stdout = os.File. Child writes directly to the
+          # inherited fd — Go spawns NO goroutine for stdout copy. If
+          # this mode is the only one that stays clean, the bug lives
+          # in Go's pipe-copy path, not in wsl.exe.
+          - scenario: file-out-30k
+            extra_flags: ""
+            iters: "30000"
+            parallel: "1"
+            modes: "file-out"
     steps:
       - uses: actions/checkout@v4
 

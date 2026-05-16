@@ -28,18 +28,22 @@ import (
 type mode string
 
 const (
-	modePlain         mode = "plain"
-	modeWSLUTF8       mode = "wsl-utf8"
-	modeWaitDelay     mode = "wait-delay"
-	modeStdinNull     mode = "stdin-null"
-	modeCmdShim       mode = "cmd-shim"
+	modePlain          mode = "plain"
+	modeWSLUTF8        mode = "wsl-utf8"
+	modeWaitDelay      mode = "wait-delay"       // WaitDelay = 5s
+	modeWaitDelay30s   mode = "wait-delay-30s"   // does the WaitDelay value matter?
+	modeStdinNull      mode = "stdin-null"
+	modeCmdShim        mode = "cmd-shim"
 	modePowershellShim mode = "powershell-shim"
-	modeRetry         mode = "retry"
+	modeRetry          mode = "retry"
+	modeCombinedOutput mode = "combined-output"  // cmd.CombinedOutput() — one buffer for both streams
+	modeFileOut        mode = "file-out"         // cmd.Stdout = os.File — child writes directly to inherited fd, no goroutine copy
 )
 
 var allModes = []mode{
-	modePlain, modeWSLUTF8, modeWaitDelay, modeStdinNull,
-	modeCmdShim, modePowershellShim, modeRetry,
+	modePlain, modeWSLUTF8, modeWaitDelay, modeWaitDelay30s,
+	modeStdinNull, modeCmdShim, modePowershellShim, modeRetry,
+	modeCombinedOutput, modeFileOut,
 }
 
 type result struct {
@@ -93,10 +97,19 @@ func buildCmd(ctx context.Context, m mode, distro, shell string) (*exec.Cmd, fun
 
 	case modeWaitDelay:
 		cmd = exec.CommandContext(ctx, "wsl.exe", "-d", distro, "bash", "-c", shell)
-		// Give the relay extra time to drain after the subprocess exits.
-		// Requires Go 1.20+; this is the closest thing to a direct fix for
-		// the EOF-before-drain race in WSL's relay.cpp.
+		// WaitDelay 5s. With a non-zero value Go spawns an extra watchCtx
+		// goroutine and adds a channel synchronization point in Wait(),
+		// even on normal exit. The two flakes in the first run both
+		// landed in this mode, so we suspect that extra path.
 		cmd.WaitDelay = 5 * time.Second
+
+	case modeWaitDelay30s:
+		cmd = exec.CommandContext(ctx, "wsl.exe", "-d", distro, "bash", "-c", shell)
+		cmd.WaitDelay = 30 * time.Second
+
+	case modeCombinedOutput, modeFileOut:
+		// Caller (runOnce) handles I/O for these modes.
+		cmd = exec.CommandContext(ctx, "wsl.exe", "-d", distro, "bash", "-c", shell)
 
 	case modeStdinNull:
 		cmd = exec.CommandContext(ctx, "wsl.exe", "-d", distro, "bash", "-c", shell)
@@ -147,20 +160,17 @@ func runOnce(ctx context.Context, m mode, distro, shell string, terminateEach bo
 	cmd, cleanup := buildCmd(ctx, m, distro, shell)
 	defer cleanup()
 
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	err := cmd.Run()
+	stdout, stderr, err := collectOutput(m, cmd)
 
 	r := result{
 		iter:      iter,
 		worker:    worker,
 		start:     start,
 		duration:  time.Since(start),
-		stdoutLen: stdout.Len(),
-		stderrLen: stderr.Len(),
-		stdout:    stdout.String(),
-		stderr:    stderr.String(),
+		stdoutLen: len(stdout),
+		stderrLen: len(stderr),
+		stdout:    string(stdout),
+		stderr:    string(stderr),
 	}
 	if cmd.ProcessState != nil {
 		r.exitCode = cmd.ProcessState.ExitCode()
@@ -170,8 +180,45 @@ func runOnce(ctx context.Context, m mode, distro, shell string, terminateEach bo
 	if err != nil {
 		r.errMsg = err.Error()
 	}
-	r.class = classify(stdout.Bytes(), stderr.Bytes(), err)
+	r.class = classify(stdout, stderr, err)
 	return r
+}
+
+// collectOutput runs cmd and returns its stdout, stderr, and run error.
+// The collection mechanism varies by mode so we can isolate where bytes
+// might get lost: bytes.Buffer (goroutine pipe-copy), CombinedOutput
+// (single buffer), or an os.File assigned directly to cmd.Stdout
+// (no goroutine — child writes straight to the inherited fd).
+func collectOutput(m mode, cmd *exec.Cmd) (stdout, stderr []byte, err error) {
+	switch m {
+	case modeCombinedOutput:
+		stdout, err = cmd.CombinedOutput()
+		return stdout, nil, err
+
+	case modeFileOut:
+		f, ferr := os.CreateTemp("", "wsl-flake-stdout-*")
+		if ferr != nil {
+			return nil, nil, ferr
+		}
+		name := f.Name()
+		defer os.Remove(name)
+		cmd.Stdout = f
+		var stderrBuf bytes.Buffer
+		cmd.Stderr = &stderrBuf
+		err = cmd.Run()
+		// Close before reading so any buffered writes in os.File flush
+		// and the read sees the complete contents.
+		_ = f.Close()
+		stdout, _ = os.ReadFile(name)
+		return stdout, stderrBuf.Bytes(), err
+
+	default:
+		var stdoutBuf, stderrBuf bytes.Buffer
+		cmd.Stdout = &stdoutBuf
+		cmd.Stderr = &stderrBuf
+		err = cmd.Run()
+		return stdoutBuf.Bytes(), stderrBuf.Bytes(), err
+	}
 }
 
 func runWithRetry(ctx context.Context, m mode, distro, shell string, terminateEach bool, maxAttempts, iter, worker int) result {
