@@ -1,0 +1,106 @@
+name: repro
+
+on:
+  workflow_dispatch:
+    inputs:
+      iters:
+        description: iterations per mode
+        default: "2000"
+      parallel:
+        description: concurrent workers
+        default: "1"
+      modes:
+        description: space-separated modes (subset of plain wsl-utf8 wait-delay stdin-null cmd-shim powershell-shim retry)
+        default: "plain wsl-utf8 wait-delay stdin-null cmd-shim powershell-shim retry"
+      alpine_version:
+        description: Alpine version for the rootfs
+        default: "3.20.3"
+
+jobs:
+  repro:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      WSL_UTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - name: build harness
+        run: go build -o wsl-flake-repro.exe .
+
+      - name: WSL status
+        shell: pwsh
+        run: |
+          wsl.exe --status
+          wsl.exe --version
+
+      # windows-latest has wsl.exe installed but no registered distro.
+      # Import a tiny Alpine rootfs so we don't depend on a slow
+      # `wsl --install Ubuntu` round-trip.
+      - name: import Alpine rootfs
+        shell: pwsh
+        env:
+          ALPINE_VERSION: ${{ inputs.alpine_version }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $minor = $env:ALPINE_VERSION -replace '\.\d+$',''
+          $url = "https://dl-cdn.alpinelinux.org/alpine/v$minor/releases/x86_64/alpine-minirootfs-$env:ALPINE_VERSION-x86_64.tar.gz"
+          $rootfs = "$env:RUNNER_TEMP\alpine.tar.gz"
+          Invoke-WebRequest -Uri $url -OutFile $rootfs
+          $installDir = "$env:RUNNER_TEMP\alpine-wsl"
+          New-Item -ItemType Directory -Force -Path $installDir | Out-Null
+          wsl.exe --import alpine-repro $installDir $rootfs --version 2
+          wsl.exe --list --verbose
+
+      - name: prime distro
+        shell: pwsh
+        run: |
+          wsl.exe -d alpine-repro -- /bin/sh -c "apk add --no-cache bash >/dev/null && bash -c 'echo prime: $(wslpath -u C:\\Windows)'"
+
+      - name: run modes
+        shell: pwsh
+        env:
+          ITERS: ${{ inputs.iters }}
+          PARALLEL: ${{ inputs.parallel }}
+          MODES: ${{ inputs.modes }}
+        run: |
+          New-Item -ItemType Directory -Force -Path results | Out-Null
+          $reproduced = @()
+          foreach ($mode in $env:MODES.Split(" ")) {
+            if (-not $mode) { continue }
+            Write-Host "::group::mode=$mode"
+            $tsv = "results/$mode.tsv"
+            & .\wsl-flake-repro.exe `
+              --distro alpine-repro `
+              --mode $mode `
+              --iters ([int]$env:ITERS) `
+              --parallel ([int]$env:PARALLEL) `
+              --out $tsv
+            $exit = $LASTEXITCODE
+            Write-Host "mode=$mode exit=$exit"
+            if ($exit -eq 3) { $reproduced += $mode }
+            Write-Host "::endgroup::"
+          }
+          if ($reproduced.Count -gt 0) {
+            Write-Host "modes that reproduced the bug: $($reproduced -join ', ')"
+          } else {
+            Write-Host "no mode reproduced the bug in this run"
+          }
+
+      - name: upload TSV results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tsv-results
+          path: results/
+
+      - name: cleanup
+        if: always()
+        shell: pwsh
+        run: |
+          wsl.exe --unregister alpine-repro 2>$null
+          wsl.exe --shutdown
