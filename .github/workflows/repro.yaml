@@ -3,15 +3,6 @@ name: repro
 on:
   workflow_dispatch:
     inputs:
-      iters:
-        description: iterations per mode
-        default: "2000"
-      parallel:
-        description: concurrent workers
-        default: "1"
-      modes:
-        description: space-separated modes (subset of plain wsl-utf8 wait-delay stdin-null cmd-shim powershell-shim retry)
-        default: "plain wsl-utf8 wait-delay stdin-null cmd-shim powershell-shim retry"
       alpine_version:
         description: Alpine version for the rootfs
         default: "3.20.3"
@@ -19,9 +10,29 @@ on:
 jobs:
   repro:
     runs-on: windows-latest
-    timeout-minutes: 60
+    timeout-minutes: 120
     env:
       WSL_UTF8: "1"
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - scenario: baseline
+            extra_flags: ""
+            iters: "2000"
+            modes: "plain wsl-utf8 wait-delay stdin-null cmd-shim powershell-shim retry"
+          - scenario: bigger-output
+            extra_flags: "--bytes 4096"
+            iters: "2000"
+            modes: "plain wsl-utf8 wait-delay stdin-null cmd-shim powershell-shim retry"
+          - scenario: terminate-each
+            extra_flags: "--terminate-each"
+            iters: "200"
+            modes: "plain wait-delay stdin-null retry"
+          - scenario: both
+            extra_flags: "--terminate-each --bytes 4096"
+            iters: "200"
+            modes: "plain wait-delay stdin-null retry"
     steps:
       - uses: actions/checkout@v4
 
@@ -39,9 +50,6 @@ jobs:
           wsl.exe --status
           wsl.exe --version
 
-      # windows-latest has wsl.exe installed but no registered distro.
-      # Import a tiny Alpine rootfs so we don't depend on a slow
-      # `wsl --install Ubuntu` round-trip.
       - name: import Alpine rootfs
         shell: pwsh
         env:
@@ -72,9 +80,9 @@ jobs:
       - name: run modes
         shell: pwsh
         env:
-          ITERS: ${{ inputs.iters }}
-          PARALLEL: ${{ inputs.parallel }}
-          MODES: ${{ inputs.modes }}
+          ITERS: ${{ matrix.iters }}
+          MODES: ${{ matrix.modes }}
+          EXTRA_FLAGS: ${{ matrix.extra_flags }}
         run: |
           New-Item -ItemType Directory -Force -Path results | Out-Null
           $reproduced = @()
@@ -82,12 +90,13 @@ jobs:
             if (-not $mode) { continue }
             Write-Host "::group::mode=$mode"
             $tsv = "results/$mode.tsv"
+            $extra = if ($env:EXTRA_FLAGS) { $env:EXTRA_FLAGS.Split(" ") } else { @() }
             & .\wsl-flake-repro.exe `
               --distro alpine-repro `
               --mode $mode `
               --iters ([int]$env:ITERS) `
-              --parallel ([int]$env:PARALLEL) `
-              --out $tsv
+              --out $tsv `
+              @extra
             $exit = $LASTEXITCODE
             Write-Host "mode=$mode exit=$exit"
             if ($exit -eq 3) { $reproduced += $mode }
@@ -96,14 +105,14 @@ jobs:
           if ($reproduced.Count -gt 0) {
             Write-Host "modes that reproduced the bug: $($reproduced -join ', ')"
           } else {
-            Write-Host "no mode reproduced the bug in this run"
+            Write-Host "no mode reproduced the bug in this scenario"
           }
 
       - name: upload TSV results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: tsv-results
+          name: tsv-${{ matrix.scenario }}
           path: results/
 
       - name: cleanup

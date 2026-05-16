@@ -109,7 +109,12 @@ func buildCmd(ctx context.Context, m mode, distro, shell string) (*exec.Cmd, fun
 			"wsl.exe", "-d", distro, "bash", "-c", shell)
 
 	case modePowershellShim:
-		ps := fmt.Sprintf(`wsl.exe -d %s bash -c %s`, distro, powershellQuote(shell))
+		// Bind the shell command to a PS variable, then pass that variable
+		// to wsl.exe. PowerShell keeps backslashes literal inside single
+		// quotes and passes $s as a single argument, so paths like
+		// C:\Windows\System32 reach bash intact.
+		ps := fmt.Sprintf(`$s = %s; & wsl.exe -d %s bash -c $s; exit $LASTEXITCODE`,
+			powershellQuote(shell), distro)
 		cmd = exec.CommandContext(ctx, "powershell.exe",
 			"-NoProfile", "-NonInteractive", "-Command", ps)
 	}
@@ -122,8 +127,18 @@ func powershellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
 }
 
-func runOnce(ctx context.Context, m mode, distro, shell string, iter, worker int) result {
+func runOnce(ctx context.Context, m mode, distro, shell string, terminateEach bool, iter, worker int) result {
 	start := time.Now()
+
+	if terminateEach {
+		// wsl --terminate forces a cold restart of the distro on the next
+		// call. The original Lima failure happened on a freshly restarted
+		// distro, which a steady-state loop cannot reproduce.
+		tctx, tcancel := context.WithTimeout(context.Background(), 10*time.Second)
+		_ = exec.CommandContext(tctx, "wsl.exe", "--terminate", distro).Run()
+		tcancel()
+	}
+
 	cmd, cleanup := buildCmd(ctx, m, distro, shell)
 	defer cleanup()
 
@@ -154,11 +169,11 @@ func runOnce(ctx context.Context, m mode, distro, shell string, iter, worker int
 	return r
 }
 
-func runWithRetry(ctx context.Context, m mode, distro, shell string, iter, worker int) result {
+func runWithRetry(ctx context.Context, m mode, distro, shell string, terminateEach bool, iter, worker int) result {
 	const maxAttempts = 3
 	var last result
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		last = runOnce(ctx, m, distro, shell, iter, worker)
+		last = runOnce(ctx, m, distro, shell, terminateEach, iter, worker)
 		last.retries = attempt - 1
 		if last.class == "OK" {
 			return last
@@ -216,6 +231,10 @@ func main() {
 			"path to translate via wslpath")
 		shellOverride = flag.String("shell", "",
 			"override the inner shell command (default: wslpath -u <test-path>)")
+		outputBytes = flag.Int("bytes", 0,
+			"if >0, default shell produces N bytes of stdout (ignored when --shell is set)")
+		terminateEach = flag.Bool("terminate-each", false,
+			"run 'wsl --terminate <distro>' before every iteration (cold restart)")
 		outPath = flag.String("out", "", "output TSV path (default: stdout)")
 		timeout = flag.Duration("timeout", 30*time.Second, "per-invocation timeout")
 		quiet   = flag.Bool("quiet", false, "suppress progress log to stderr")
@@ -236,7 +255,12 @@ func main() {
 
 	shell := *shellOverride
 	if shell == "" {
-		shell = fmt.Sprintf(`wslpath -u %q`, *testPath)
+		if *outputBytes > 0 {
+			// head -c N /dev/zero | tr '\0' 'x' emits exactly N 'x' bytes.
+			shell = fmt.Sprintf(`head -c %d /dev/zero | tr '\0' 'x'`, *outputBytes)
+		} else {
+			shell = fmt.Sprintf(`wslpath -u %q`, *testPath)
+		}
 	}
 
 	out := os.Stdout
@@ -278,9 +302,9 @@ func main() {
 				ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 				var r result
 				if m == modeRetry {
-					r = runWithRetry(ctx, m, *distro, shell, iter, worker)
+					r = runWithRetry(ctx, m, *distro, shell, *terminateEach, iter, worker)
 				} else {
-					r = runOnce(ctx, m, *distro, shell, iter, worker)
+					r = runOnce(ctx, m, *distro, shell, *terminateEach, iter, worker)
 				}
 				cancel()
 
