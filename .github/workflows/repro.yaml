@@ -17,25 +17,19 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # file-out-repeat: re-run file-out to confirm the 0/30k result
-          # from the previous matrix wasn't fortune.
-          - scenario: file-out-30k-repeat
-            extra_flags: ""
-            iters: "30000"
+          # retry-40k: with a reliable repro at ~1/4000, measure retry
+          # directly. max-retries=10 shows the full recovery tail
+          # rather than truncating at 3. Expect ~10 flake events
+          # across 40k iters; the `attempts` column records each
+          # attempt's class. Questions answered:
+          #   - Do all flakes recover on attempt 2 (independence)?
+          #   - Do any need 3+ attempts (clustering)?
+          #   - Do any exhaust all 10 attempts (residual failure)?
+          - scenario: retry-40k-max10
+            extra_flags: "--max-retries 10"
+            iters: "40000"
             parallel: "1"
-            modes: "file-out"
-
-          # bash-pipe: Git Bash captures wsl.exe in $(...) and re-emits
-          # the value. The outer Go capture uses file-out (the path we
-          # proved reliable), so any empty result was lost by bash's
-          # pipe capture. Confirms the 2023 cmd.exe-in-subshell pattern
-          # applies to wsl.exe in bash on Windows. Lower iter count
-          # because every call pays bash startup overhead.
-          - scenario: bash-pipe-15k
-            extra_flags: ""
-            iters: "15000"
-            parallel: "1"
-            modes: "bash-pipe"
+            modes: "retry"
     steps:
       - uses: actions/checkout@v4
 
