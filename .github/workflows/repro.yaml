@@ -17,22 +17,43 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - scenario: baseline
+          # serial-20k: confirm baseline rate at higher sample size
+          - scenario: serial-20k-plain
             extra_flags: ""
-            iters: "2000"
-            modes: "plain wsl-utf8 wait-delay stdin-null cmd-shim powershell-shim retry"
-          - scenario: bigger-output
-            extra_flags: "--bytes 4096"
-            iters: "2000"
-            modes: "plain wsl-utf8 wait-delay stdin-null cmd-shim powershell-shim retry"
-          - scenario: terminate-each
-            extra_flags: "--terminate-each"
-            iters: "200"
-            modes: "plain wait-delay stdin-null retry"
-          - scenario: both
-            extra_flags: "--terminate-each --bytes 4096"
-            iters: "200"
-            modes: "plain wait-delay stdin-null retry"
+            iters: "20000"
+            parallel: "1"
+            modes: "plain"
+
+          # serial-20k-retry: prove retry catches flakes (look for rows where
+          # `attempts` contains EMPTY_STDOUT_NIL_ERR followed by OK)
+          - scenario: serial-20k-retry
+            extra_flags: "--max-retries 3"
+            iters: "20000"
+            parallel: "1"
+            modes: "retry"
+
+          # parallel-4: does concurrent contention against the same distro
+          # raise the rate? Same total calls, four workers.
+          - scenario: parallel-4-20k
+            extra_flags: ""
+            iters: "20000"
+            parallel: "4"
+            modes: "plain"
+
+          # parallel-8: more pressure (windows-latest has 4 vCPUs, this
+          # oversubscribes)
+          - scenario: parallel-8-20k
+            extra_flags: ""
+            iters: "20000"
+            parallel: "8"
+            modes: "plain"
+
+          # parallel-8-retry: stress retry under contention
+          - scenario: parallel-8-retry-50k
+            extra_flags: "--max-retries 3"
+            iters: "50000"
+            parallel: "8"
+            modes: "retry"
     steps:
       - uses: actions/checkout@v4
 
@@ -81,6 +102,7 @@ jobs:
         shell: pwsh
         env:
           ITERS: ${{ matrix.iters }}
+          PARALLEL: ${{ matrix.parallel }}
           MODES: ${{ matrix.modes }}
           EXTRA_FLAGS: ${{ matrix.extra_flags }}
         run: |
@@ -95,6 +117,8 @@ jobs:
               --distro alpine-repro `
               --mode $mode `
               --iters ([int]$env:ITERS) `
+              --parallel ([int]$env:PARALLEL) `
+              --quiet `
               --out $tsv `
               @extra
             $exit = $LASTEXITCODE

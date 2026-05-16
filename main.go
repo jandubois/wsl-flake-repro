@@ -55,6 +55,11 @@ type result struct {
 	errMsg   string
 	class    string
 	retries  int
+	// attempts lists the class of every attempt for this iter in retry
+	// mode (e.g. ["EMPTY_STDOUT_NIL_ERR", "OK"]). Empty for non-retry
+	// modes. A row with both EMPTY and OK in attempts proves retry
+	// recovered the flake.
+	attempts []string
 }
 
 func classify(stdout, stderr []byte, err error) string {
@@ -169,26 +174,28 @@ func runOnce(ctx context.Context, m mode, distro, shell string, terminateEach bo
 	return r
 }
 
-func runWithRetry(ctx context.Context, m mode, distro, shell string, terminateEach bool, iter, worker int) result {
-	const maxAttempts = 3
+func runWithRetry(ctx context.Context, m mode, distro, shell string, terminateEach bool, maxAttempts, iter, worker int) result {
 	var last result
+	var classes []string
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		last = runOnce(ctx, m, distro, shell, terminateEach, iter, worker)
+		classes = append(classes, last.class)
 		last.retries = attempt - 1
 		if last.class == "OK" {
-			return last
+			break
 		}
 		if attempt < maxAttempts {
 			time.Sleep(time.Duration(attempt) * 200 * time.Millisecond)
 		}
 	}
+	last.attempts = classes
 	return last
 }
 
 func tsvHeader(w io.Writer) {
 	fmt.Fprintln(w, strings.Join([]string{
 		"timestamp", "iter", "worker", "duration_ms", "exit_code",
-		"stdout_len", "stderr_len", "retries", "class",
+		"stdout_len", "stderr_len", "retries", "class", "attempts",
 		"stdout_preview", "stderr_preview", "err",
 	}, "\t"))
 }
@@ -213,6 +220,7 @@ func tsvRow(w io.Writer, r result) {
 		fmt.Sprintf("%d", r.stderrLen),
 		fmt.Sprintf("%d", r.retries),
 		r.class,
+		strings.Join(r.attempts, ","),
 		preview(r.stdout),
 		preview(r.stderr),
 		preview(r.errMsg),
@@ -235,6 +243,8 @@ func main() {
 			"if >0, default shell produces N bytes of stdout (ignored when --shell is set)")
 		terminateEach = flag.Bool("terminate-each", false,
 			"run 'wsl --terminate <distro>' before every iteration (cold restart)")
+		maxRetries = flag.Int("max-retries", 3,
+			"attempts per iteration in retry mode")
 		outPath = flag.String("out", "", "output TSV path (default: stdout)")
 		timeout = flag.Duration("timeout", 30*time.Second, "per-invocation timeout")
 		quiet   = flag.Bool("quiet", false, "suppress progress log to stderr")
@@ -302,7 +312,7 @@ func main() {
 				ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 				var r result
 				if m == modeRetry {
-					r = runWithRetry(ctx, m, *distro, shell, *terminateEach, iter, worker)
+					r = runWithRetry(ctx, m, *distro, shell, *terminateEach, *maxRetries, iter, worker)
 				} else {
 					r = runOnce(ctx, m, *distro, shell, *terminateEach, iter, worker)
 				}
