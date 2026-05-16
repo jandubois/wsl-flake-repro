@@ -28,6 +28,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.22"
+          cache: false
 
       - name: build harness
         run: go build -o wsl-flake-repro.exe .
@@ -56,10 +57,17 @@ jobs:
           wsl.exe --import alpine-repro $installDir $rootfs --version 2
           wsl.exe --list --verbose
 
-      - name: prime distro
+      - name: install bash in the distro
         shell: pwsh
         run: |
-          wsl.exe -d alpine-repro -- /bin/sh -c "apk add --no-cache bash >/dev/null && bash -c 'echo prime: $(wslpath -u C:\\Windows)'"
+          wsl.exe -d alpine-repro -- /sbin/apk add --no-cache bash
+
+      - name: smoke-test bash and wslpath
+        shell: pwsh
+        run: |
+          # Single-quote the outer PowerShell string so $(...) stays literal
+          # and runs in the distro, not on the host.
+          wsl.exe -d alpine-repro -- /bin/bash -c 'echo "prime: $(wslpath -u C:\\Windows)"'
 
       - name: run modes
         shell: pwsh
