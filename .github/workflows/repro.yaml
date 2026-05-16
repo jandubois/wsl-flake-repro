@@ -17,52 +17,25 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # plain: control. cmd.Stdout = bytes.Buffer, no WaitDelay.
-          # Uses Go's goroutine pipe-copy for stdout collection.
-          - scenario: plain-30k
-            extra_flags: ""
-            iters: "30000"
-            parallel: "1"
-            modes: "plain"
-
-          # wait-delay-5s: same as plain, plus WaitDelay = 5s. With a
-          # non-zero WaitDelay on a CommandContext, Go spawns a watchCtx
-          # goroutine and adds a channel synchronization in Wait() that
-          # the plain path skips. Both flakes from the first run landed
-          # in this mode.
-          - scenario: wait-delay-5s-30k
-            extra_flags: ""
-            iters: "30000"
-            parallel: "1"
-            modes: "wait-delay"
-
-          # wait-delay-30s: same as wait-delay-5s with a larger value.
-          # If WaitDelay merely flips the watchCtx path on/off, the
-          # rate here should match wait-delay-5s.
-          - scenario: wait-delay-30s-30k
-            extra_flags: ""
-            iters: "30000"
-            parallel: "1"
-            modes: "wait-delay-30s"
-
-          # combined-output: cmd.CombinedOutput() collects stdout and
-          # stderr into one buffer. Tests whether the two-buffer
-          # arrangement contributes.
-          - scenario: combined-output-30k
-            extra_flags: ""
-            iters: "30000"
-            parallel: "1"
-            modes: "combined-output"
-
-          # file-out: cmd.Stdout = os.File. Child writes directly to the
-          # inherited fd — Go spawns NO goroutine for stdout copy. If
-          # this mode is the only one that stays clean, the bug lives
-          # in Go's pipe-copy path, not in wsl.exe.
-          - scenario: file-out-30k
+          # file-out-repeat: re-run file-out to confirm the 0/30k result
+          # from the previous matrix wasn't fortune.
+          - scenario: file-out-30k-repeat
             extra_flags: ""
             iters: "30000"
             parallel: "1"
             modes: "file-out"
+
+          # bash-pipe: Git Bash captures wsl.exe in $(...) and re-emits
+          # the value. The outer Go capture uses file-out (the path we
+          # proved reliable), so any empty result was lost by bash's
+          # pipe capture. Confirms the 2023 cmd.exe-in-subshell pattern
+          # applies to wsl.exe in bash on Windows. Lower iter count
+          # because every call pays bash startup overhead.
+          - scenario: bash-pipe-15k
+            extra_flags: ""
+            iters: "15000"
+            parallel: "1"
+            modes: "bash-pipe"
     steps:
       - uses: actions/checkout@v4
 
@@ -106,6 +79,13 @@ jobs:
           # Single-quote the outer PowerShell string so $(...) stays literal
           # and runs in the distro, not on the host.
           wsl.exe -d alpine-repro -- /bin/bash -c 'echo "prime: $(wslpath -u C:\\Windows)"'
+
+      - name: smoke-test Git Bash (needed for bash-pipe mode)
+        shell: pwsh
+        run: |
+          $bash = "C:\Program Files\Git\bin\bash.exe"
+          if (-not (Test-Path $bash)) { throw "Git Bash not found at $bash" }
+          & $bash -c 'r=$(wsl.exe -d alpine-repro -- echo bash-pipe-prime); printf "bash-pipe prime: %s\n" "$r"'
 
       - name: run modes
         shell: pwsh

@@ -38,12 +38,13 @@ const (
 	modeRetry          mode = "retry"
 	modeCombinedOutput mode = "combined-output"  // cmd.CombinedOutput() — one buffer for both streams
 	modeFileOut        mode = "file-out"         // cmd.Stdout = os.File — child writes directly to inherited fd, no goroutine copy
+	modeBashPipe       mode = "bash-pipe"        // Git Bash wraps wsl.exe in $(...). Tests the 2023 cmd.exe-in-subshell pattern.
 )
 
 var allModes = []mode{
 	modePlain, modeWSLUTF8, modeWaitDelay, modeWaitDelay30s,
 	modeStdinNull, modeCmdShim, modePowershellShim, modeRetry,
-	modeCombinedOutput, modeFileOut,
+	modeCombinedOutput, modeFileOut, modeBashPipe,
 }
 
 type result struct {
@@ -135,6 +136,16 @@ func buildCmd(ctx context.Context, m mode, distro, shell string) (*exec.Cmd, fun
 			powershellQuote(shell), distro)
 		cmd = exec.CommandContext(ctx, "powershell.exe",
 			"-NoProfile", "-NonInteractive", "-Command", ps)
+
+	case modeBashPipe:
+		// Git Bash captures wsl.exe via $(...) and re-emits the result.
+		// The outer Go capture uses file-out (no goroutine), so any
+		// empty value here was lost by bash's pipe capture, not ours.
+		// Uses a fixed inner command to sidestep MSYS path-translation
+		// surprises around backslashes.
+		const bashPath = `C:\Program Files\Git\bin\bash.exe`
+		script := fmt.Sprintf(`r=$(wsl.exe -d %s -- echo wsl-flake-marker); printf '%%s' "$r"`, distro)
+		cmd = exec.CommandContext(ctx, bashPath, "-c", script)
 	}
 
 	return cmd, cleanup
@@ -195,7 +206,10 @@ func collectOutput(m mode, cmd *exec.Cmd) (stdout, stderr []byte, err error) {
 		stdout, err = cmd.CombinedOutput()
 		return stdout, nil, err
 
-	case modeFileOut:
+	case modeFileOut, modeBashPipe:
+		// bash-pipe also exits via the file-out path so the outer Go
+		// capture is the proven-reliable one; any empty result must
+		// have been lost inside bash's $() capture.
 		f, ferr := os.CreateTemp("", "wsl-flake-stdout-*")
 		if ferr != nil {
 			return nil, nil, ferr
