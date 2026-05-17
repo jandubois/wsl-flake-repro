@@ -80,6 +80,33 @@ jobs:
           # and runs in the distro, not on the host.
           wsl.exe -d alpine-repro -- /bin/bash -c 'echo "prime: $(wslpath -u C:\\Windows)"'
 
+      - name: capture runner identification
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path results | Out-Null
+          $info = @"
+          timestamp:     $(Get-Date -Format o)
+          scenario:      ${{ matrix.scenario_name }}
+          runner_idx:    ${{ matrix.runner_idx }}
+          runner_os:     $env:RUNNER_OS
+          runner_arch:   $env:RUNNER_ARCH
+          runner_name:   $env:RUNNER_NAME
+          image_os:      $env:ImageOS
+          image_version: $env:ImageVersion
+          computer_name: $env:COMPUTERNAME
+
+          --- Get-CimInstance Win32_OperatingSystem ---
+          $(Get-CimInstance Win32_OperatingSystem | Select-Object Caption, Version, BuildNumber, OSArchitecture | Format-List | Out-String)
+
+          --- wsl.exe --version ---
+          $(wsl.exe --version | Out-String)
+
+          --- Get-CimInstance Win32_Processor (name, cores) ---
+          $(Get-CimInstance Win32_Processor | Select-Object Name, NumberOfCores, NumberOfLogicalProcessors | Format-List | Out-String)
+          "@
+          $info | Out-File -FilePath results/runner-info.txt -Encoding UTF8
+          Get-Content results/runner-info.txt
+
       - name: smoke-test Git Bash (needed for bash-pipe mode)
         shell: pwsh
         run: |
