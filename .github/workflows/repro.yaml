@@ -16,16 +16,23 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Ten parallel windows-latest runners, each running retry mode at
-        # 30k iters with max-retries=10. Combined sample: 300k iters,
-        # expected ~50-60 flake events. Bounds the per-retry failure
-        # rate and tests whether rates vary by runner.
+        # 10 runners x 2 scenarios = 20 parallel cells. Steady-state retry
+        # recovered 47/47 events on attempt 2. These two scenarios test
+        # whether retry holds under the conditions that produced the
+        # original Lima failure: concurrent wsl.exe calls (parallel-4)
+        # and post-restart fresh distros (terminate-each).
         runner_idx: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
-        scenario: [retry-30k-max10]
-        extra_flags: ["--max-retries 10"]
-        iters: ["30000"]
-        parallel: ["1"]
+        scenario_name: [retry-parallel-4, retry-terminate-each]
         modes: [retry]
+        include:
+          - scenario_name: retry-parallel-4
+            extra_flags: "--max-retries 10"
+            iters: "30000"
+            parallel: "4"
+          - scenario_name: retry-terminate-each
+            extra_flags: "--max-retries 10 --terminate-each"
+            iters: "25000"
+            parallel: "1"
     steps:
       - uses: actions/checkout@v4
 
