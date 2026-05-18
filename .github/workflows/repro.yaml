@@ -25,15 +25,26 @@ jobs:
         # but the comparison was vs a serial run from a different day.
         # Today's serial-baseline cells provide the same-day control.
         runner_idx: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
-        scenario_name: [retry-serial-baseline, retry-terminate-each]
-        modes: [retry]
+        scenario_name: [retry-serial-baseline, retry-terminate-each, plain-baseline]
         include:
           - scenario_name: retry-serial-baseline
+            modes: retry
             extra_flags: "--max-retries 10"
             iters: "30000"
             parallel: "1"
           - scenario_name: retry-terminate-each
+            modes: retry
             extra_flags: "--max-retries 10 --terminate-each"
+            iters: "30000"
+            parallel: "1"
+          # plain-baseline: environmental control. Runs 4 and 5 saw plain
+          # mode flake at ~1/4k. If today's plain rate is also ~0, the
+          # silence isn't a test-change artifact — it's the fleet. If
+          # plain shows historical rates while retry shows 0, the retry
+          # wrapper is somehow involved.
+          - scenario_name: plain-baseline
+            modes: plain
+            extra_flags: ""
             iters: "30000"
             parallel: "1"
     steps:

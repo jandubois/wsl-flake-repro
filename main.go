@@ -70,6 +70,10 @@ type result struct {
 	// Earlier runs only kept the LAST attempt's err, which is useless
 	// when the last attempt is a downstream timeout.
 	firstFailedErr string
+	// firstFailedStderr captures the stderr of the first non-OK attempt.
+	// Pairs with firstFailedErr: err tells us the Go-level error, stderr
+	// tells us what the subprocess actually said before failing.
+	firstFailedStderr string
 }
 
 func classify(stdout, stderr []byte, err error) string {
@@ -249,15 +253,15 @@ func collectOutput(m mode, cmd *exec.Cmd) (stdout, stderr []byte, err error) {
 func runWithRetry(timeout time.Duration, m mode, distro, shell string, terminateEach bool, maxAttempts, iter, worker int) result {
 	var last result
 	var classes []string
-	var firstFailedErr string
+	var firstFailedErr, firstFailedStderr string
+	haveFirstFailure := false
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		last = runOnce(timeout, m, distro, shell, terminateEach, iter, worker)
 		classes = append(classes, last.class)
-		if last.class != "OK" && firstFailedErr == "" {
+		if last.class != "OK" && !haveFirstFailure {
+			haveFirstFailure = true
 			firstFailedErr = last.errMsg
-			if firstFailedErr == "" {
-				firstFailedErr = fmt.Sprintf("class=%s stderr=%q", last.class, last.stderr)
-			}
+			firstFailedStderr = last.stderr
 		}
 		last.retries = attempt - 1
 		if last.class == "OK" {
@@ -269,6 +273,7 @@ func runWithRetry(timeout time.Duration, m mode, distro, shell string, terminate
 	}
 	last.attempts = classes
 	last.firstFailedErr = firstFailedErr
+	last.firstFailedStderr = firstFailedStderr
 	return last
 }
 
@@ -276,7 +281,8 @@ func tsvHeader(w io.Writer) {
 	fmt.Fprintln(w, strings.Join([]string{
 		"timestamp", "iter", "worker", "duration_ms", "exit_code",
 		"stdout_len", "stderr_len", "retries", "class", "attempts",
-		"stdout_preview", "stderr_preview", "err", "first_failed_err",
+		"stdout_preview", "stderr_preview", "err",
+		"first_failed_err", "first_failed_stderr",
 	}, "\t"))
 }
 
@@ -305,6 +311,7 @@ func tsvRow(w io.Writer, r result) {
 		preview(r.stderr),
 		preview(r.errMsg),
 		preview(r.firstFailedErr),
+		preview(r.firstFailedStderr),
 	}, "\t"))
 }
 
