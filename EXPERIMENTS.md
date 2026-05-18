@@ -10,9 +10,11 @@ Running record of every workflow run, what it asked, what it found, and how it c
 - That common failure shape affects every I/O collection mechanism we have tested: Go `bytes.Buffer` (goroutine pipe-copy), Go `cmd.CombinedOutput()`, Go `cmd.Stdout = os.File` (no goroutine; inherited file fd), and bash `$(...)` capture. The bug is on the *sending* side — `wsl.exe`'s relay — not on the parent's receiving side.
 - For the common failure shape, a single retry recovers it. Across Runs 6-7 (54 events) and Run 9 (6 events), every empty-stdout event recovered on attempt 2.
 
-**Qualified (Run 11 update):**
+**Qualified (Runs 11-12):**
 
-- **A second, rarer failure shape exists.** Run 11 saw one event where the first attempt returned a non-nil error (not deadline-exceeded) and no subsequent retries could recover. The old harness shared a 30-second parent context across retries, so we cannot distinguish "wsl.exe actually hung" from "retry implementation poisoned itself" for that event. New harness gives each attempt its own context; the next such event will be diagnosable.
+- **A second, rarer failure shape exists: `wsl.exe` exits with status 1.** Distinct from the empty-stdout shape. Stderr from the failed attempt was lost (the harness still only captures the last attempt's stderr), so we don't know what bash actually said.
+- **This second shape can need more than one retry.** Run 12's only event recovered on attempt 3 (`ERR, ERR, OK`) after a 22.77-second final attempt. Mitigation specs should allow at least 3 attempts rather than hard-coding 2.
+- **Both observed exit-1 events fired under terminate-each.** One event each in Runs 11 and 12, both in terminate-each cells, none in serial-baseline. Suggestive but not confirmatory — n=2 is too small to claim terminate-each *causes* the exit-1 shape rather than just *correlates* with it.
 
 **Refuted / ruled out:**
 
@@ -229,3 +231,34 @@ First attempt: `ERR` (non-nil error other than `context.DeadlineExceeded`). Next
 **Runner-info verdict:** every cell stamped identical (Windows Server 2025 Datacenter, image `20260510.128.1`, WSL 2.7.3.0, computer_name `runnervmp4gaq`). The capture doesn't discriminate today's fleet members. Useful only as a baseline for future runs that might show heterogeneous fields.
 
 **Changed:** The "retry catches every flake" claim from Runs 6-7 has to be qualified — those runs captured only the empty-stdout failure shape. A retry-blocking failure shape exists and we now know to watch for it.
+
+### Run 12 — rerun with per-attempt contexts + first_failed_err (workflow run [26009188480](https://github.com/jandubois/wsl-flake-repro/actions/runs/26009188480))
+
+**Question:** With the harness fix in place (per-attempt context; first_failed_err column), what does the other failure shape actually look like?
+
+**Matrix:** Identical to Runs 10-11.
+
+**Results:**
+
+| scenario              | iters   | events |
+| --------------------- | ------- | ------ |
+| retry-serial-baseline | 300,000 | 0      |
+| retry-terminate-each  | 300,000 | **1**, recovered |
+
+The single event:
+```
+iter 12666, runner 5
+attempts: ERR, ERR, OK
+final attempt duration: 22,770 ms
+first_failed_err: exit status 1
+```
+
+**Learned:**
+
+1. The harness fix works — no cascading TIMEOUTs this round. Each attempt got its own 30s context, so attempts 2 and 3 ran cleanly instead of inheriting an exhausted parent.
+2. The non-empty-stdout failure shape is `exit status 1`, not a hang. The bash invocation inside `wsl.exe` exited non-zero. We still don't capture per-attempt stderr, so we don't know *why* bash exited 1.
+3. Recovery needed TWO retries (attempt 3 was the OK one). Every flake before Run 11 had recovered on attempt 2. The "single retry always recovers" claim from Runs 6-7 was measuring only the empty-stdout shape; the exit-1 shape behaves differently and sometimes needs more retries.
+4. The recovering attempt took 22.77 seconds — 40× slower than a normal terminate-each iter (~550ms). Likely the post-terminate distro state needed time to settle after the prior failures.
+5. Empty-stdout shape: zero events for the third run in a row across the combined 1.5M sample (Runs 10-12).
+
+**Changed:** "Retry recovers on attempt 2" is now "retry recovers, sometimes on attempt 2, sometimes on attempt 3, in our small sample." Mitigation specifications should not hard-code a max-retry of 2. Per-attempt stderr capture is the next obvious diagnostic gap: we'd like to know what bash actually said when it exited 1.
