@@ -6,38 +6,50 @@ Running record of every workflow run, what it asked, what it found, and how it c
 
 **Confirmed:**
 
-- The bug exists and produces a consistent signature: exit code 0, stdout 0 bytes, **stderr also 0 bytes**, normal latency (~120 ms). Total silent loss of the call's output.
-- The bug affects every I/O collection mechanism we have tested: Go `bytes.Buffer` (goroutine pipe-copy), Go `cmd.CombinedOutput()`, Go `cmd.Stdout = os.File` (no goroutine; inherited file fd), and bash `$(...)` capture. Same rate within an order of magnitude across all four. The bug is on the *sending* side — `wsl.exe`'s relay — not on the parent's receiving side.
-- A single retry recovers the lost call. Across all retry runs to date, no event has needed more than one retry to succeed. Per-retry failure rate is bounded below ~5% with 95% confidence.
+- The bug exists and produces a consistent signature on its most common manifestation: exit code 0, stdout 0 bytes, **stderr also 0 bytes**, normal latency (~120 ms). Total silent loss of the call's output.
+- That common failure shape affects every I/O collection mechanism we have tested: Go `bytes.Buffer` (goroutine pipe-copy), Go `cmd.CombinedOutput()`, Go `cmd.Stdout = os.File` (no goroutine; inherited file fd), and bash `$(...)` capture. The bug is on the *sending* side — `wsl.exe`'s relay — not on the parent's receiving side.
+- For the common failure shape, a single retry recovers it. Across Runs 6-7 (54 events) and Run 9 (6 events), every empty-stdout event recovered on attempt 2.
+
+**Qualified (Run 11 update):**
+
+- **A second, rarer failure shape exists.** Run 11 saw one event where the first attempt returned a non-nil error (not deadline-exceeded) and no subsequent retries could recover. The old harness shared a 30-second parent context across retries, so we cannot distinguish "wsl.exe actually hung" from "retry implementation poisoned itself" for that event. New harness gives each attempt its own context; the next such event will be diagnosable.
 
 **Refuted / ruled out:**
 
-- *Go's `WaitDelay` machinery causes it.* Initial 2-flake clustering in `wait-delay` mode at n=24k was within sampling noise; later runs at higher n showed identical rates across `plain` / `wait-delay-5s` / `wait-delay-30s`.
-- *Go's pipe-copy goroutine causes it.* `file-out` (no goroutine) flakes at the same rate as `bytes.Buffer`-based modes when sampled to sufficient n.
-- *Concurrent contention amplifies it.* `parallel-4` against the same distro produced *fewer* events per call than serial (1/50k vs 1/6.4k in the same fleet conditions).
-- *Distro cold restart triggers it.* `terminate-each` hint suggests cold restart may *suppress* the bug, not trigger it.
+- *Go's `WaitDelay` machinery causes it.* Initial 2-flake clustering in `wait-delay` mode at n=24k was within sampling noise; Run 4 showed identical rates across `plain` / `wait-delay-5s` / `wait-delay-30s`.
+- *Go's pipe-copy goroutine causes it.* `file-out` (no goroutine) flakes at the same rate as `bytes.Buffer`-based modes when sampled to sufficient n (Run 5).
+
+**Reduced to "we can't tell":**
+
+- *`terminate-each` suppresses the bug.* Run 9 saw 0/128k under terminate-each vs many events under other scenarios in the same fleet conditions. Run 10 tried to confirm with a same-run baseline — and saw 0/300k under serial-baseline too. So the Run 9 terminate-each signal looks like a low-rate day, not a real suppression effect. Cannot confirm or refute terminate-each as a mitigation.
+- *Concurrent contention reduces the rate.* Same story — Run 9's parallel-4 rate of 1/50k vs serial 1/6.4k looked striking, but the baseline rate has since moved by 50× across runs. We can't trust any rate comparison across runs.
+
+**The bigger issue surfaced by Run 10:** the bug rate is wildly non-stationary across runs, with at least 50× variation observed (Run 7 serial: 47/300k = 1/6400; Run 10 serial: 0/300k = <1/300k, same code, same call shape). We have a genuine bug but no reliable on-demand reproducer. Comparisons across runs are unreliable; only same-run comparisons are trustworthy, and they require enough events on a high-rate day to be meaningful.
 
 **Open questions:**
 
-- Why does the per-call rate vary 25× across days (1/2000 to <1/128k)? Probable suspects: runner fleet rotation, WSL build differences, host load.
-- Does `terminate-each` genuinely suppress the bug, or did we sample too few events to tell?
-- What state inside `wsl.exe` / `wslservice.exe` / the distro VM might accumulate across warm calls and reset on terminate?
-- Is the bug correlated with call frequency (calls per unit time) rather than call count?
+- What controls the per-day rate? Runner fleet rotation is the leading suspect.
+- Is there a way to detect "high-rate" conditions and only run comparison experiments then?
+- Mechanistic hypothesis (unproven): `wsl.exe`'s user-mode relay swallows exceptions in the CATCH_LOG paths at thread boundaries. Both stdout and stderr relay threads die on the same event, producing exactly this signature. Not yet verified against MS WSL source.
 
 **Mechanistic hypothesis (unproven):** `wsl.exe`'s user-mode relay copies bytes from the in-distro process's vsock output to the Windows-side handle the spawn inherited. The CATCH_LOG paths in `src/windows/common/relay.cpp` swallow exceptions at the relay thread boundary — if both the stdout and stderr relay threads die on the same event (consistent with the stderr-also-empty observation), we'd see exactly this signature. Not yet confirmed against MS WSL source step-through.
 
 ## Cumulative sample
 
-Counts cover all completed cells through Run 9. Pipe-mode includes any
+Counts cover all completed cells through Run 10. Pipe-mode includes any
 mode that captures stdout via a pipe or via bash `$(...)`; file-out is
-listed separately because of the earlier (now refuted) hypothesis it
-might be immune.
+listed separately for historical reasons (Run 4 hypothesis it might be
+immune, since refuted).
 
-| capture path                | iters    | events | rate    |
-| --------------------------- | -------- | ------ | ------- |
-| pipe-mode (Go bytes.Buffer + CombinedOutput + bash-pipe + Go retry) | ~850,000 | 105    | ~1/8100 |
-| file-out (Go inherited fd)  | 60,000   | 12     | 1/5000  |
-| terminate-each (any mode)   | 128,000  | 0      | <1/128k |
+| capture path                | iters     | events | aggregate rate |
+| --------------------------- | --------- | ------ | -------------- |
+| pipe-mode (Go bytes.Buffer + CombinedOutput + bash-pipe + Go retry) | ~1,087,000 | 97     | ~1/11,000 |
+| file-out (Go inherited fd)  | 60,000    | 12     | 1/5,000        |
+| terminate-each (any mode)   | 398,000   | 0      | <1/398,000     |
+
+Aggregate rates are roughly meaningful only for capture-mechanism
+comparisons. The per-run variance is so large that a single aggregate
+rate hides the underlying instability.
 
 ## Runs
 
@@ -167,12 +179,53 @@ might be immune.
 
 **Note on artifact-name bug:** Last run's upload step referenced `matrix.scenario` instead of `matrix.scenario_name`, so all 20 artifacts collided on 10 names. Data was salvaged by downloading via artifact ID and classifying by file size (completed cells were larger than cancelled ones).
 
-### Run 10 — same-run baseline vs terminate-each (workflow run [25986011686](https://github.com/jandubois/wsl-flake-repro/actions/runs/25986011686), in progress)
+### Run 10 — same-run baseline vs terminate-each (workflow run [25986011686](https://github.com/jandubois/wsl-flake-repro/actions/runs/25986011686))
 
 **Question:** Is terminate-each's near-zero rate real, or was it within-day fleet variance compared to a different-day serial baseline?
 
-**Matrix:** 10 runners × 2 scenarios × 30k iters serial each. Both scenarios run in the *same workflow run* so fleet conditions are identical. `retry-serial-baseline` (no terminate) provides the control; `retry-terminate-each` (terminate before each iter) is the treatment.
+**Matrix:** 10 runners × 2 scenarios × 30k iters serial each. Both scenarios in the same workflow run so fleet conditions are identical. `retry-serial-baseline` (no terminate) is the control; `retry-terminate-each` is the treatment. Job timeout bumped to 360 min because terminate-each at 30k iters takes ~4.5 hours per cell.
 
-**Job timeout bumped to 360 min** because terminate-each at 30k iters takes ~4.5 hours per cell.
+**Results:** **Zero events across both scenarios.** 19 of 20 cells finished; one terminate-each cell (runner 7) hit the 360-min timeout and was cancelled.
 
-**Result:** TBD.
+| scenario              | iters   | events |
+| --------------------- | ------- | ------ |
+| retry-serial-baseline | 300,000 | 0      |
+| retry-terminate-each  | 270,000 | 0      |
+
+**Learned:** Today was a low-rate day across the entire windows-latest fleet. The serial-baseline at 0/300k is incompatible with Run 7's serial-baseline at 47/300k under any single-rate model — rate moved by at least 50×. Same code, same harness, same call shape, different day.
+
+**Changed:** Run 9's "terminate-each suppresses the bug" finding can no longer be claimed as a real effect — today's serial-baseline was also zero. Same applies to Run 9's "parallel-4 has lower rate than serial." Both look like fleet variance, not mode-specific effects. We have a bug we can sometimes reproduce but cannot reproduce on demand.
+
+### Run 11 — rerun with runner identification (workflow run [25999304336](https://github.com/jandubois/wsl-flake-repro/actions/runs/25999304336))
+
+**Question:** Repeat Run 10's same-run comparison; capture per-cell runner identity (image, WSL version, computer name) in case fleet variance correlates with anything visible.
+
+**Matrix:** Identical to Run 10. New per-cell step writes `runner-info.txt` to the artifact.
+
+**Results:**
+
+| scenario              | iters   | events |
+| --------------------- | ------- | ------ |
+| retry-serial-baseline | 300,000 | 0      |
+| retry-terminate-each  | 300,000 | **1**, unrecovered |
+
+The single event broke the streak — and broke it in a way nothing else had:
+
+```
+iter 15244, runner 8, duration 51ms (last attempt), exit -1
+attempts: ERR, TIMEOUT, TIMEOUT, TIMEOUT, TIMEOUT, TIMEOUT,
+          TIMEOUT, TIMEOUT, TIMEOUT, TIMEOUT
+err: context deadline exceeded
+```
+
+First attempt: `ERR` (non-nil error other than `context.DeadlineExceeded`). Next nine attempts: `TIMEOUT`.
+
+**Two findings, one investigation flaw, one new failure mode:**
+
+1. **The harness shared a 30-second parent context across all retry attempts.** A slow first attempt that exhausted the context poisoned every subsequent retry — they hit `context.DeadlineExceeded` immediately. So the `TIMEOUT × 9` pattern doesn't tell us the underlying wsl.exe behavior; it tells us the retry implementation was broken. Fixed by giving each attempt its own context (commit after Run 11). Per-attempt `first_failed_err` column added to capture the first attempt's err on future events.
+
+2. **A new wsl.exe failure shape exists beyond exit-0/empty-stdout.** The first attempt's error was *something* — non-nil but not deadline-exceeded. We lost the actual error message because the old harness only kept the last attempt's err. With the new harness we will see it next time.
+
+**Runner-info verdict:** every cell stamped identical (Windows Server 2025 Datacenter, image `20260510.128.1`, WSL 2.7.3.0, computer_name `runnervmp4gaq`). The capture doesn't discriminate today's fleet members. Useful only as a baseline for future runs that might show heterogeneous fields.
+
+**Changed:** The "retry catches every flake" claim from Runs 6-7 has to be qualified — those runs captured only the empty-stdout failure shape. A retry-blocking failure shape exists and we now know to watch for it.

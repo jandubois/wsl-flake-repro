@@ -65,6 +65,11 @@ type result struct {
 	// modes. A row with both EMPTY and OK in attempts proves retry
 	// recovered the flake.
 	attempts []string
+	// firstFailedErr captures the err message of the first non-OK
+	// attempt, so a failed retry chain leaves diagnostic breadcrumbs.
+	// Earlier runs only kept the LAST attempt's err, which is useless
+	// when the last attempt is a downstream timeout.
+	firstFailedErr string
 }
 
 func classify(stdout, stderr []byte, err error) string {
@@ -156,7 +161,7 @@ func powershellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
 }
 
-func runOnce(ctx context.Context, m mode, distro, shell string, terminateEach bool, iter, worker int) result {
+func runOnce(timeout time.Duration, m mode, distro, shell string, terminateEach bool, iter, worker int) result {
 	start := time.Now()
 
 	if terminateEach {
@@ -167,6 +172,12 @@ func runOnce(ctx context.Context, m mode, distro, shell string, terminateEach bo
 		_ = exec.CommandContext(tctx, "wsl.exe", "--terminate", distro).Run()
 		tcancel()
 	}
+
+	// Fresh context per call. In retry mode, runWithRetry calls runOnce
+	// repeatedly; giving each attempt its own context prevents a slow
+	// first attempt from exhausting the budget for subsequent retries.
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
 
 	cmd, cleanup := buildCmd(ctx, m, distro, shell)
 	defer cleanup()
@@ -235,12 +246,19 @@ func collectOutput(m mode, cmd *exec.Cmd) (stdout, stderr []byte, err error) {
 	}
 }
 
-func runWithRetry(ctx context.Context, m mode, distro, shell string, terminateEach bool, maxAttempts, iter, worker int) result {
+func runWithRetry(timeout time.Duration, m mode, distro, shell string, terminateEach bool, maxAttempts, iter, worker int) result {
 	var last result
 	var classes []string
+	var firstFailedErr string
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		last = runOnce(ctx, m, distro, shell, terminateEach, iter, worker)
+		last = runOnce(timeout, m, distro, shell, terminateEach, iter, worker)
 		classes = append(classes, last.class)
+		if last.class != "OK" && firstFailedErr == "" {
+			firstFailedErr = last.errMsg
+			if firstFailedErr == "" {
+				firstFailedErr = fmt.Sprintf("class=%s stderr=%q", last.class, last.stderr)
+			}
+		}
 		last.retries = attempt - 1
 		if last.class == "OK" {
 			break
@@ -250,6 +268,7 @@ func runWithRetry(ctx context.Context, m mode, distro, shell string, terminateEa
 		}
 	}
 	last.attempts = classes
+	last.firstFailedErr = firstFailedErr
 	return last
 }
 
@@ -257,7 +276,7 @@ func tsvHeader(w io.Writer) {
 	fmt.Fprintln(w, strings.Join([]string{
 		"timestamp", "iter", "worker", "duration_ms", "exit_code",
 		"stdout_len", "stderr_len", "retries", "class", "attempts",
-		"stdout_preview", "stderr_preview", "err",
+		"stdout_preview", "stderr_preview", "err", "first_failed_err",
 	}, "\t"))
 }
 
@@ -285,6 +304,7 @@ func tsvRow(w io.Writer, r result) {
 		preview(r.stdout),
 		preview(r.stderr),
 		preview(r.errMsg),
+		preview(r.firstFailedErr),
 	}, "\t"))
 }
 
@@ -370,14 +390,12 @@ func main() {
 					return
 				}
 
-				ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 				var r result
 				if m == modeRetry {
-					r = runWithRetry(ctx, m, *distro, shell, *terminateEach, *maxRetries, iter, worker)
+					r = runWithRetry(*timeout, m, *distro, shell, *terminateEach, *maxRetries, iter, worker)
 				} else {
-					r = runOnce(ctx, m, *distro, shell, *terminateEach, iter, worker)
+					r = runOnce(*timeout, m, *distro, shell, *terminateEach, iter, worker)
 				}
-				cancel()
 
 				outMu.Lock()
 				tsvRow(out, r)
