@@ -6,6 +6,9 @@ on:
       alpine_version:
         description: Alpine version for the rootfs
         default: "3.20.3"
+      harness_sha:
+        description: Build the harness from this commit's main.go instead of HEAD (leave empty for HEAD). Used to verify that observed-rate changes are real and not a harness regression.
+        default: ""
 
 jobs:
   repro:
@@ -54,6 +57,13 @@ jobs:
         with:
           go-version: "1.22"
           cache: false
+
+      - name: swap in older harness if requested
+        if: inputs.harness_sha != ''
+        run: |
+          git checkout ${{ inputs.harness_sha }} -- main.go go.mod go.sum 2>/dev/null || git checkout ${{ inputs.harness_sha }} -- main.go go.mod
+          echo "Built from harness_sha: ${{ inputs.harness_sha }}"
+          git log -1 --format="%H %s" ${{ inputs.harness_sha }} -- main.go
 
       - name: build harness
         run: go build -o wsl-flake-repro.exe .
@@ -163,7 +173,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: tsv-${{ matrix.scenario_name }}-runner-${{ matrix.runner_idx }}
+          name: tsv-${{ matrix.scenario_name }}-runner-${{ matrix.runner_idx }}${{ inputs.harness_sha != '' && format('-sha-{0}', inputs.harness_sha) || '' }}
           path: results/
 
       - name: cleanup
