@@ -60,8 +60,12 @@ jobs:
 
       - name: swap in older harness if requested
         if: inputs.harness_sha != ''
+        shell: bash
         run: |
-          git checkout ${{ inputs.harness_sha }} -- main.go go.mod go.sum 2>/dev/null || git checkout ${{ inputs.harness_sha }} -- main.go go.mod
+          # Old commits may not have go.sum; try the broader checkout first
+          # and fall back to main.go + go.mod only if it fails.
+          git checkout ${{ inputs.harness_sha }} -- main.go go.mod go.sum 2>/dev/null \
+            || git checkout ${{ inputs.harness_sha }} -- main.go go.mod
           echo "Built from harness_sha: ${{ inputs.harness_sha }}"
           git log -1 --format="%H %s" ${{ inputs.harness_sha }} -- main.go
 

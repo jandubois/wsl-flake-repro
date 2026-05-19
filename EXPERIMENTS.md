@@ -358,3 +358,35 @@ first_failed_stderr: (empty)
 3. **Variance collapsed.** Baseline had 3,978 ms outliers (presumably warm-state interruptions when background services woke up). Post-tuning, every warm call is within ±10 ms of the average. If the bug is sensitive to specific timing windows, a stable-timing configuration may or may not still hit them.
 
 **Decision:** Did not run a full 30k under the tuned config today. GHA also showed 0 events today, so a same-day local run would just record another 0/0. The "does config affect rate" question is testable only on an event-positive day; deferred until events return.
+
+### Run 15 — Mode A returns; harness-regression check (HEAD vs d55d70d) (2026-05-19)
+
+**Question:** Are we still running the same tests as Run 4 (which saw 7 events in 30k)? Sanity check by running the d55d70d harness against today's matrix alongside HEAD.
+
+**Setup:** Two parallel workflow dispatches.
+
+- HEAD harness: workflow run [26080236389](https://github.com/jandubois/wsl-flake-repro/actions/runs/26080236389) — 30 cells (10 runners × 3 scenarios), full HEAD harness.
+- Old harness (d55d70d, the Run 4 code): workflow run [26080233967](https://github.com/jandubois/wsl-flake-repro/actions/runs/26080233967) — same matrix; the workflow checks out main.go at d55d70d before building.
+
+**Results:**
+
+HEAD run:
+
+| scenario              | iters   | events |
+| --------------------- | ------- | ------ |
+| plain-baseline        | 300,000 | **1** (Mode A) |
+| retry-serial-baseline | 300,000 | 0      |
+| retry-terminate-each  | 300,000 | 0      |
+
+The Mode A event: `plain-baseline` runner 2, iter 1636, duration 126 ms, exit 0, stdout 0 bytes, stderr 0 bytes. Classic signature.
+
+Old-harness run: **failed to start.** All 30 cells errored at the new "swap in older harness" workflow step because PowerShell parsed bash-style `2>/dev/null` as `Out-File -FilePath null`. Fixed by adding `shell: bash` to the step; re-dispatch pending.
+
+**Learned:**
+
+1. **Mode A is not gone, just rare.** First empty-stdout event in many runs. At 1/300k today versus ~1/4k historically, the rate has dropped ~75× but stayed non-zero. The earlier streak of zeros was a low-rate window, not extinction.
+2. **plain mode still observes Mode A.** Same code as Run 4, same conditions, the test reproduces the bug when conditions cooperate. Test integrity is not in question.
+3. **Retry mode showed zero with the same 300k iters.** At a 1/300k underlying rate, P(retry sees 0 | rate=1/300k, n=300k) ≈ 37%, so consistent with chance. No basis yet for claiming retry mode behaves differently from plain on the underlying call.
+4. **The old-harness sanity check is still useful** because all the post-Run-4 harness changes touch only the retry path. The plain-mode call shape is byte-identical between d55d70d and HEAD. Once the workflow swap step is fixed, the comparison still answers "would old code see events under today's conditions?"
+
+**Changed:** "Mode A may have been fixed upstream" is no longer the best read; the rate is just low. EXPERIMENTS.md should describe Mode A as "low but observable" rather than "currently dormant."
