@@ -4,17 +4,27 @@ Running record of every workflow run, what it asked, what it found, and how it c
 
 ## Current understanding
 
-**Confirmed:**
+There appear to be **two distinct failure modes**, not one.
 
-- The bug exists and produces a consistent signature on its most common manifestation: exit code 0, stdout 0 bytes, **stderr also 0 bytes**, normal latency (~120 ms). Total silent loss of the call's output.
-- That common failure shape affects every I/O collection mechanism we have tested: Go `bytes.Buffer` (goroutine pipe-copy), Go `cmd.CombinedOutput()`, Go `cmd.Stdout = os.File` (no goroutine; inherited file fd), and bash `$(...)` capture. The bug is on the *sending* side — `wsl.exe`'s relay — not on the parent's receiving side.
-- For the common failure shape, a single retry recovers it. Across Runs 6-7 (54 events) and Run 9 (6 events), every empty-stdout event recovered on attempt 2.
+### Mode A: empty stdout (the original bug)
 
-**Qualified (Runs 11-12):**
+- Signature: exit 0, stdout 0 bytes, stderr 0 bytes, normal latency (~120 ms). Total silent loss of the call's output.
+- Affects every I/O collection mechanism tested — `bytes.Buffer`, `CombinedOutput`, file-out (inherited fd), bash `$(...)`. The byte loss is on the *sending* side, in `wsl.exe`'s user-mode relay; not on the parent's receiving side.
+- Historical rate ~1/4k under serial conditions; varies 50× across days.
+- **Currently dormant**: zero events across 1.5M+ iters in Runs 10-13. Either a recent WSL release shifted the rate, or fleet-wide conditions are temporarily favorable.
+- One retry recovers reliably whenever this shape fires.
 
-- **A second, rarer failure shape exists: `wsl.exe` exits with status 1.** Distinct from the empty-stdout shape. Stderr from the failed attempt was lost (the harness still only captures the last attempt's stderr), so we don't know what bash actually said.
-- **This second shape can need more than one retry.** Run 12's only event recovered on attempt 3 (`ERR, ERR, OK`) after a 22.77-second final attempt. Mitigation specs should allow at least 3 attempts rather than hard-coding 2.
-- **Both observed exit-1 events fired under terminate-each.** One event each in Runs 11 and 12, both in terminate-each cells, none in serial-baseline. Suggestive but not confirmatory — n=2 is too small to claim terminate-each *causes* the exit-1 shape rather than just *correlates* with it.
+### Mode B: exit 1 (newer, rarer)
+
+- Signature: exit 1, stdout 0 bytes, stderr 0 bytes, recovering attempt ~22 seconds. The captured `first_failed_stderr` is empty — bash printed nothing before exiting.
+- Observed rate ~1/300k.
+- 3 of 3 observed events under terminate-each; zero under serial-baseline or plain-baseline. Strong correlation with cold-restart conditions, weak sample size.
+- Needs two retries (recovers on attempt 3 in both observed cases), with a ~22-second recovering attempt. Likely mechanism: terminate signals the distro to shut down, the next wsl.exe call races a still-shutting-down distro, wsl.exe fails to attach, attempt 3 waits for WSL's internal timeout to clear the state.
+
+### Cross-cutting
+
+- A 2-attempt retry budget is insufficient for Mode B. Mitigation specs should allow at least 3.
+- The harness has been progressively de-bugged through this investigation: per-attempt context (commit 043bfdc) and per-attempt stderr capture (commit c0649dc) were both needed to characterize Mode B.
 
 **Refuted / ruled out:**
 
@@ -262,3 +272,36 @@ first_failed_err: exit status 1
 5. Empty-stdout shape: zero events for the third run in a row across the combined 1.5M sample (Runs 10-12).
 
 **Changed:** "Retry recovers on attempt 2" is now "retry recovers, sometimes on attempt 2, sometimes on attempt 3, in our small sample." Mitigation specifications should not hard-code a max-retry of 2. Per-attempt stderr capture is the next obvious diagnostic gap: we'd like to know what bash actually said when it exited 1.
+
+### Run 13 — environmental control + first_failed_stderr (workflow run [26064103744](https://github.com/jandubois/wsl-flake-repro/actions/runs/26064103744))
+
+**Question:** Is the recent low rate environmental or specific to our test changes? Capture the first-failed attempt's stderr so we can finally see what bash said on exit-1 events.
+
+**Matrix:** 10 runners × 3 scenarios = 30 cells. Added `plain-baseline` (no retry wrapper) alongside the two retry scenarios.
+
+**Results:**
+
+| scenario              | iters   | events |
+| --------------------- | ------- | ------ |
+| plain-baseline        | 300,000 | 0      |
+| retry-serial-baseline | 300,000 | 0      |
+| retry-terminate-each  | 270,000 | **1**, recovered |
+
+One terminate-each cell cancelled at the 360-min timeout (same slow-cell behavior as Runs 10-12).
+
+The single event:
+```
+iter 18118, runner 2, terminate-each
+attempts: ERR, ERR, OK
+final attempt duration: 22.32 seconds
+first_failed_err:    exit status 1
+first_failed_stderr: (empty)
+```
+
+**Learned:**
+
+1. **The low rate is environment-wide, not retry-mode specific.** plain-baseline at 0/300k in the *same workflow run* as retry-serial-baseline at 0/300k closes that hypothesis. Both modes capture wsl.exe stdout the same way — only retry adds the retry loop. Same observable rate means the wrapper isn't doing anything special.
+2. **First-failed-stderr finally captured — and it's empty.** Bash exited 1 with no stderr output. That rules out a "bash printed an error we missed" theory and points at wsl.exe itself or the distro state, not bash's exit logic.
+3. **The exit-1 events now look like a distinct, reproducible failure mode.** Runs 12 and 13 match almost exactly: both terminate-each, both ERR,ERR,OK, both recovered on attempt 3, both with ~22-second recovering attempts (22.77s and 22.32s). 3 of 3 observed exit-1 events have been under terminate-each. The mechanism is plausibly: terminate signals the distro to shut down, the next call races the shutdown, wsl.exe fails to attach, and the third attempt waits for whatever WSL-internal timeout clears the state.
+
+**Changed:** We probably have *two* distinct failure modes, not one. The empty-stdout shape (variable rate, mode-agnostic, single-retry recovery) and the exit-1 shape (~1/300k, terminate-each only, two-retry recovery with ~22s settle time). EXPERIMENTS.md should stop treating them as one bug.
