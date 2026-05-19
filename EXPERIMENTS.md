@@ -10,9 +10,10 @@ There appear to be **two distinct failure modes**, not one.
 
 - Signature: exit 0, stdout 0 bytes, stderr 0 bytes, normal latency (~120 ms). Total silent loss of the call's output.
 - Affects every I/O collection mechanism tested — `bytes.Buffer`, `CombinedOutput`, file-out (inherited fd), bash `$(...)`. The byte loss is on the *sending* side, in `wsl.exe`'s user-mode relay; not on the parent's receiving side.
-- Historical rate ~1/4k under serial conditions; varies 50× across days.
-- **Currently dormant**: zero events across 1.5M+ iters in Runs 10-13. Either a recent WSL release shifted the rate, or fleet-wide conditions are temporarily favorable.
-- One retry recovers reliably whenever this shape fires.
+- Historical rate ~1/4k on GHA windows-latest; varies widely across runs and days.
+- **Recent GHA rate: low but non-zero.** Run 15 captured 1/300k in plain mode. Rate has dropped ~75× from the historical baseline, but the bug still fires.
+- **Never observed on Jan's local workstation.** Across all local runs (Run 14, 14b, 15b), zero events in 180k+ iters. Could be hardware-class dependent (constrained cloud VMs vs abundant-resource workstation), specific to GHA's Hyper-V configuration, or another factor we have not isolated.
+- One retry recovers reliably whenever this shape fires (all observed Mode A events recovered on attempt 2).
 
 ### Mode B: exit 1 (newer, rarer)
 
@@ -332,7 +333,7 @@ first_failed_stderr: (empty)
 **Learned:**
 
 1. **The low rate is not GHA-specific.** Same calendar day, same WSL version, same zero rate locally — environment-wide, not fleet-side.
-2. **Per-call speed doesn't drive the rate.** Local at 262 ms/call shows zero; GHA at 50-150 ms/call also shows zero. Earlier theories tying flake rate to call latency or runner CPU class are weakened — fast and slow get the same result.
+2. **Local at 262 ms/call shows zero events.** Earlier theories tying GHA's flake rate specifically to per-call latency weakened, but the comparison is limited: this machine has never flaked, so it cannot rule speed in or out as a driver. A machine that has historically produced events under one latency profile would be needed to test the latency claim properly.
 3. **WSL version is the most plausible remaining lever for Mode A's variability.** Both environments today are on WSL 2.7.3.0. A controlled test with an older WSL service version on the same physical machine would tell us whether Microsoft fixed (or masked) the empty-stdout bug in a recent service update.
 
 **Changed:** "GHA fleet rotation" demoted as the leading explanation for run-to-run rate variance. WSL service version moved up.
@@ -408,9 +409,14 @@ Old-harness run: **failed to start.** All 30 cells errored at the new "swap in o
 
 **Learned:**
 
-1. **Neither power plan nor Defender shifts the local rate.** 120k iters with zero events across four configurations. The 95% upper bound on the per-iter rate from this sample is ~0.0031%, well below the historical ~0.025%.
+1. **Local rate stayed at zero across all four configurations.** 120k iters, zero events.
 2. **Latency dropped 39% in wall clock under the tuned config** (130.9 min → 79.9 min). Power plan accounted for ~33 pp; Defender ~6 pp.
 3. **Per-call timing collapsed to a tight band.** Typical range went from 176–300 ms to 134–180 ms. Cold-start outliers (~4 s) persisted in both configs.
-4. **Latency is independent of bug rate.** Local at 262 ms saw zero events; local at 159 ms saw zero events; GHA at ~100 ms saw 1/300k. The rate is not driven by per-call speed.
 
-**Changed:** Power plan and Defender real-time scanning ruled out as drivers of the local rate on WSL 2.7.3.0, at least for the configurations tested. If WSL ships an update that flips the rate back, both factors warrant a fresh test.
+**Important caveat on what local zeros tell us:**
+
+The local machine has *never* shown Mode A in any run, under any config. We do not have a high-rate baseline on this hardware. The Run 15b zeros do not prove "power plan and Defender are irrelevant" — they prove "neither config triggers the bug on a machine that does not flake anyway."
+
+Every confirmed Mode A event captured in this investigation has been on GHA windows-latest. The 2023 cmd.exe-from-bash observation was on a different physical machine (no longer available for testing). Jan's current workstation — high core count, abundant memory, low contention — is qualitatively different hardware from GHA's smaller, more constrained VMs. The bug may correlate with constrained cloud-VM conditions (oversubscribed CPU, slower I/O, shared-tenant scheduling) that the workstation does not reproduce regardless of power settings.
+
+**Changed:** Removed the earlier "power plan / Defender ruled out" claim from Current understanding. The honest summary: those factors are untestable until we have a machine that produces baseline events.
