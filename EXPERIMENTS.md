@@ -390,3 +390,27 @@ Old-harness run: **failed to start.** All 30 cells errored at the new "swap in o
 4. **The old-harness sanity check is still useful** because all the post-Run-4 harness changes touch only the retry path. The plain-mode call shape is byte-identical between d55d70d and HEAD. Once the workflow swap step is fixed, the comparison still answers "would old code see events under today's conditions?"
 
 **Changed:** "Mode A may have been fixed upstream" is no longer the best read; the rate is just low. EXPERIMENTS.md should describe Mode A as "low but observable" rather than "currently dormant."
+
+### Run 15b — local full sweep, High Performance + Defender off (2026-05-19)
+
+**Question:** Does the tuned-config baseline (High Performance power plan, Defender real-time scanning disabled) change the local flake rate?
+
+**Setup:** Same host (DESKTOP-R0D3F8V), same WSL 2.7.3.0, same Ubuntu distro. Re-ran the LOCAL_PLAN scenarios under the tuned config and compared against the prior Run 14 baseline.
+
+**Results:**
+
+| run    | config                            | iters  | events | wall (min) | avg ms/call |
+| ------ | --------------------------------- | ------ | ------ | ---------- | ----------- |
+| plain  | Balanced + Defender on            | 30,000 | 0      | 130.9      | 261.2       |
+| retry  | Balanced + Defender on            | 30,000 | 0      | 131.8      | 262.8       |
+| plain  | High Performance + Defender off   | 30,000 | 0      | 79.9       | 159.3       |
+| retry  | High Performance + Defender off   | 30,000 | 0      | 79.9       | 159.3       |
+
+**Learned:**
+
+1. **Neither power plan nor Defender shifts the local rate.** 120k iters with zero events across four configurations. The 95% upper bound on the per-iter rate from this sample is ~0.0031%, well below the historical ~0.025%.
+2. **Latency dropped 39% in wall clock under the tuned config** (130.9 min → 79.9 min). Power plan accounted for ~33 pp; Defender ~6 pp.
+3. **Per-call timing collapsed to a tight band.** Typical range went from 176–300 ms to 134–180 ms. Cold-start outliers (~4 s) persisted in both configs.
+4. **Latency is independent of bug rate.** Local at 262 ms saw zero events; local at 159 ms saw zero events; GHA at ~100 ms saw 1/300k. The rate is not driven by per-call speed.
+
+**Changed:** Power plan and Defender real-time scanning ruled out as drivers of the local rate on WSL 2.7.3.0, at least for the configurations tested. If WSL ships an update that flips the rate back, both factors warrant a fresh test.
