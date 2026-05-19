@@ -336,3 +336,25 @@ first_failed_stderr: (empty)
 3. **WSL version is the most plausible remaining lever for Mode A's variability.** Both environments today are on WSL 2.7.3.0. A controlled test with an older WSL service version on the same physical machine would tell us whether Microsoft fixed (or masked) the empty-stdout bug in a recent service update.
 
 **Changed:** "GHA fleet rotation" demoted as the leading explanation for run-to-run rate variance. WSL service version moved up.
+
+### Run 14b — local latency sweep across power/Defender configs (2026-05-18)
+
+**Question:** Does the local machine's slow ~262 ms/call latency reflect the hardware, the power plan, or Defender's I/O hooking?
+
+**Method:** Short timing probe (no full 30k run) under three configurations on DESKTOP-R0D3F8V.
+
+**Results:**
+
+| config                              | min ms | avg ms | max ms |
+| ----------------------------------- | ------ | ------ | ------ |
+| Baseline (Balanced + Defender on)   | 176    | 261    | 3978   |
+| High Performance + Defender on      | 167.5  | 176    | 184.4  |
+| High Performance + Defender off     | 156.6  | 163    | 170.7  |
+
+**Learned:**
+
+1. **Power plan dominates.** Switching Balanced → High Performance dropped average latency by ~33%. Most of the local-vs-GHA latency gap was the laptop CPU clocking down on idle, not the hardware itself.
+2. **Defender adds ~13 ms (~7%) on top.** Real-time scanning hooks process spawn and stdio. Small in averages, but it does alter the timing windows around each call.
+3. **Variance collapsed.** Baseline had 3,978 ms outliers (presumably warm-state interruptions when background services woke up). Post-tuning, every warm call is within ±10 ms of the average. If the bug is sensitive to specific timing windows, a stable-timing configuration may or may not still hit them.
+
+**Decision:** Did not run a full 30k under the tuned config today. GHA also showed 0 events today, so a same-day local run would just record another 0/0. The "does config affect rate" question is testable only on an event-positive day; deferred until events return.
