@@ -55,13 +55,15 @@ immune, since refuted).
 
 | capture path                | iters     | events | aggregate rate |
 | --------------------------- | --------- | ------ | -------------- |
-| pipe-mode (Go bytes.Buffer + CombinedOutput + bash-pipe + Go retry) | ~1,087,000 | 97     | ~1/11,000 |
+| pipe-mode, GHA (Go bytes.Buffer + CombinedOutput + bash-pipe + Go retry) | ~1,687,000 | 97     | ~1/17,000 |
+| pipe-mode, local Windows (plain + retry, 2026-05-18) | 60,000    | 0      | <1/60,000 |
 | file-out (Go inherited fd)  | 60,000    | 12     | 1/5,000        |
-| terminate-each (any mode)   | 398,000   | 0      | <1/398,000     |
+| terminate-each (any mode)   | ~1,238,000  | 3 (all Mode B) | ~1/410,000 |
 
 Aggregate rates are roughly meaningful only for capture-mechanism
 comparisons. The per-run variance is so large that a single aggregate
-rate hides the underlying instability.
+rate hides the underlying instability — especially the post-Run-9
+silence in Mode A.
 
 ## Runs
 
@@ -305,3 +307,32 @@ first_failed_stderr: (empty)
 3. **The exit-1 events now look like a distinct, reproducible failure mode.** Runs 12 and 13 match almost exactly: both terminate-each, both ERR,ERR,OK, both recovered on attempt 3, both with ~22-second recovering attempts (22.77s and 22.32s). 3 of 3 observed exit-1 events have been under terminate-each. The mechanism is plausibly: terminate signals the distro to shut down, the next call races the shutdown, wsl.exe fails to attach, and the third attempt waits for whatever WSL-internal timeout clears the state.
 
 **Changed:** We probably have *two* distinct failure modes, not one. The empty-stdout shape (variable rate, mode-agnostic, single-retry recovery) and the exit-1 shape (~1/300k, terminate-each only, two-retry recovery with ~22s settle time). EXPERIMENTS.md should stop treating them as one bug.
+
+### Run 14 — local Windows comparison (2026-05-18, Jan's DESKTOP-R0D3F8V)
+
+**Question:** Is the recent zero-event streak GHA-fleet-specific or environment-wide?
+
+**Setup:**
+
+- Host: DESKTOP-R0D3F8V (Windows 11 Pro, build 26100.8457)
+- WSL: 2.7.3.0, kernel 6.6.114.1-1 — same as GHA fleet today
+- Distro: Ubuntu
+- CPU: Intel Xeon E5-2650L v3 (2014, Haswell-EP, 12C/12T @ 1.80 GHz) — substantially slower than the modern hardware behind GHA runners
+- Power plan: Balanced; Defender real-time protection: on
+
+**Matrix:** plain @ 30k iters serial; retry @ 30k iters with `--max-retries 10`. Both run on the same machine, one after the other.
+
+**Results:**
+
+| scenario | iters  | events | wall clock | avg/call |
+| -------- | ------ | ------ | ---------- | -------- |
+| plain    | 30,000 | 0      | 130.9 min  | 261.2 ms |
+| retry    | 30,000 | 0      | 131.8 min  | 262.8 ms |
+
+**Learned:**
+
+1. **The low rate is not GHA-specific.** Same calendar day, same WSL version, same zero rate locally — environment-wide, not fleet-side.
+2. **Per-call speed doesn't drive the rate.** Local at 262 ms/call shows zero; GHA at 50-150 ms/call also shows zero. Earlier theories tying flake rate to call latency or runner CPU class are weakened — fast and slow get the same result.
+3. **WSL version is the most plausible remaining lever for Mode A's variability.** Both environments today are on WSL 2.7.3.0. A controlled test with an older WSL service version on the same physical machine would tell us whether Microsoft fixed (or masked) the empty-stdout bug in a recent service update.
+
+**Changed:** "GHA fleet rotation" demoted as the leading explanation for run-to-run rate variance. WSL service version moved up.
