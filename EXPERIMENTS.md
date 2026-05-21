@@ -392,6 +392,8 @@ Old-harness run: **failed to start.** All 30 cells errored at the new "swap in o
 
 **Changed:** "Mode A may have been fixed upstream" is no longer the best read; the rate is just low. EXPERIMENTS.md should describe Mode A as "low but observable" rather than "currently dormant."
 
+**Follow-up — old-harness rerun (workflow run [26108689491](https://github.com/jandubois/wsl-flake-repro/actions/runs/26108689491))**: re-dispatched after fixing the PowerShell quoting bug. All 30 cells failed at the swap step with `fatal: invalid reference: d55d70d` — `actions/checkout@v4` defaults to `fetch-depth: 1`, so the older commit sat outside the runner's local history. Skipped a second fix because plain-mode code at d55d70d is byte-identical to HEAD (verified via `git show d55d70d:main.go` diff), and HEAD's run captured a fresh Mode A event the same day.
+
 ### Run 15b — local full sweep, High Performance + Defender off (2026-05-19)
 
 **Question:** Does the tuned-config baseline (High Performance power plan, Defender real-time scanning disabled) change the local flake rate?
